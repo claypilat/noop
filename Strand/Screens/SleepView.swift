@@ -60,6 +60,11 @@ struct SleepView: View {
     /// when the sleep-performance score changes, exactly as TodayView drives its rings. Presentation-only.
     @State private var heroFraction: Double = 0
 
+    /// Non-nil while the wake-time editor sheet is open. Carries the night's stable key (`startTs`) and
+    /// current wake time so the editor seeds its picker; saving routes through `repo.editSleepWakeTime`,
+    /// which marks the session `userEdited` so a later strap sync can't revert the correction. (#318)
+    @State private var wakeEdit: WakeEdit?
+
     var body: some View {
         // Resolve the memoized model for THIS render. `dataKey` is O(1)-ish (counts + last-row
         // identity), so comparing it every render is cheap. When it matches the cached key we
@@ -127,6 +132,11 @@ struct SleepView: View {
                 navNight = nil
                 modelKey = dataKey
                 model = buildModel()
+            }
+            .sheet(item: $wakeEdit) { edit in
+                WakeTimeEditor(startTs: edit.startTs, endTs: edit.endTs) { newEndTs in
+                    await repo.editSleepWakeTime(startTs: edit.startTs, newEndTs: newEndTs)
+                }
             }
         }
     }
@@ -296,7 +306,8 @@ struct SleepView: View {
                 Rectangle().fill(StrandPalette.hairline).frame(width: 1, height: 30)
                 Spacer(minLength: 12)
                 sleepTime(icon: "sun.max.fill", label: "Woke", value: night.wakeText)
-                Spacer(minLength: 0)
+                Spacer(minLength: 8)
+                wakeEditButton(night)
             }
             .frame(maxWidth: .infinity)
         }
@@ -314,6 +325,22 @@ struct SleepView: View {
             }
         }
         .accessibilityElement(children: .combine)
+    }
+
+    /// Pencil affordance that opens the wake-time editor for `night`. Auto-detection misreads the wake
+    /// time most often (a late lie-in, or a morning stir read as still-asleep), so a one-tap correction
+    /// lives right next to the "Woke" value. A filled pencil marks a night already hand-corrected. (#318)
+    private func wakeEditButton(_ night: Night) -> some View {
+        Button {
+            wakeEdit = WakeEdit(startTs: night.session.startTs, endTs: night.session.endTs)
+        } label: {
+            Image(systemName: night.session.userEdited ? "pencil.circle.fill" : "pencil.circle")
+                .font(StrandFont.headline)
+                .foregroundStyle(StrandPalette.restColor)
+        }
+        .buttonStyle(.plain)
+        .help("Edit wake time")
+        .accessibilityLabel(night.session.userEdited ? "Edit wake time (edited)" : "Edit wake time")
     }
 
     /// Full-width proportional stacked stage bar (fallback when no intervals).
@@ -1281,6 +1308,90 @@ private struct Night {
     /// Onset side of a cross-midnight span — no month (the wake side carries it): "Fri 13".
     private static let spanFmt: DateFormatter = {
         let f = DateFormatter(); f.dateFormat = "EEE d"; return f
+    }()
+}
+
+// MARK: - Wake-time editor
+
+/// Identifies the night being edited for `.sheet(item:)`. A night's `startTs` is its stable natural
+/// key (wake-time edits never move it), so it doubles as the sheet identity.
+private struct WakeEdit: Identifiable {
+    let startTs: Int
+    let endTs: Int
+    var id: Int { startTs }
+}
+
+/// A small sheet to hand-correct a night's wake (end) time. Seeds a picker with the current wake time,
+/// bounded to after sleep onset and within a day of it, and hands the chosen unix-second wake time back
+/// via `onSave`. Pure presentation + a single async save — all persistence lives in the store/repo.
+private struct WakeTimeEditor: View {
+    let startTs: Int
+    let onSave: (Int) async -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var wake: Date
+    @State private var saving = false
+
+    init(startTs: Int, endTs: Int, onSave: @escaping (Int) async -> Void) {
+        self.startTs = startTs
+        self.onSave = onSave
+        _wake = State(initialValue: Date(timeIntervalSince1970: TimeInterval(endTs)))
+    }
+
+    private var onset: Date { Date(timeIntervalSince1970: TimeInterval(startTs)) }
+    /// Wake must be after onset (≥ 1 min) and within a day of it — a sane clamp that also stops the
+    /// picker offering a wake time from before you fell asleep.
+    private var range: ClosedRange<Date> {
+        onset.addingTimeInterval(60) ... onset.addingTimeInterval(24 * 3600)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+            Text("Edit wake time").font(StrandFont.title2).foregroundStyle(StrandPalette.textPrimary)
+            Text("Correct when you actually woke. Your edit is kept through the next strap sync.")
+                .font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            NoopCard(padding: NoopMetrics.cardPadding, tint: StrandPalette.restColor) {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text("Asleep").strandOverline()
+                        Spacer()
+                        Text(Self.fmt.string(from: onset))
+                            .font(StrandFont.number(17)).foregroundStyle(StrandPalette.textSecondary)
+                    }
+                    Divider().overlay(StrandPalette.hairline)
+                    DatePicker("Woke", selection: $wake, in: range,
+                               displayedComponents: [.date, .hourAndMinute])
+                        .datePickerStyle(.compact)
+                        .font(StrandFont.body)
+                        .tint(StrandPalette.restColor)
+                }
+            }
+
+            HStack(spacing: NoopMetrics.gap) {
+                Button("Cancel") { dismiss() }
+                    .buttonStyle(.noopGhost)
+                    .disabled(saving)
+                Spacer()
+                Button(saving ? "Saving…" : "Save") {
+                    saving = true
+                    Task {
+                        await onSave(Int(wake.timeIntervalSince1970))
+                        dismiss()
+                    }
+                }
+                .buttonStyle(.noopPrimary)
+                .disabled(saving)
+            }
+        }
+        .padding(NoopMetrics.screenPadding)
+        .frame(minWidth: 360)
+        .background(StrandPalette.surfaceOverlay)
+    }
+
+    private static let fmt: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "h:mm a"; return f
     }()
 }
 

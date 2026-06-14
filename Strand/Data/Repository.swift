@@ -393,6 +393,19 @@ final class Repository: ObservableObject {
         return (imported + computedKept).sorted { $0.startTs < $1.startTs }
     }
 
+    /// Hand-correct a night's wake (end) time. The merged session list carries no source deviceId
+    /// (same reason as the journal reads below), so this applies the edit under BOTH the imported and
+    /// computed sources keyed by the stable (deviceId, startTs) — only the namespace that actually
+    /// holds the night updates; the other is a no-op. The `userEdited` flag the store sets then makes
+    /// the next strap re-sync preserve the correction instead of overwriting it. Refreshes so the
+    /// hero re-reads the corrected time immediately.
+    func editSleepWakeTime(startTs: Int, newEndTs: Int) async {
+        guard let store = await ensureStore() else { return }
+        _ = try? await store.setSleepWakeTime(deviceId: computedDeviceId, startTs: startTs, endTs: newEndTs)
+        _ = try? await store.setSleepWakeTime(deviceId: deviceId, startTs: startTs, endTs: newEndTs)
+        await refresh()
+    }
+
     // MARK: - Metric explorer reads (generic substrate)
 
     /// Daily series for any metric key from a given source ("my-whoop" / "apple-health").
