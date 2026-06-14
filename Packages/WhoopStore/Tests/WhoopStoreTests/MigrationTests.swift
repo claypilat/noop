@@ -40,6 +40,13 @@ final class MigrationTests: XCTestCase {
             let cols = try await store.columnNamesForTest(table: table)
             XCTAssertTrue(cols.contains("synced"), "\(table) missing synced column")
         }
-        XCTAssertEqual(WhoopStoreInfo.schemaVersion, 12)
+        XCTAssertEqual(WhoopStoreInfo.schemaVersion, 13)
+    }
+
+    /// v13 adds the `userEdited` flag to sleepSession (user-corrected wake times survive re-sync).
+    func testV13AddsUserEditedColumnToSleepSession() async throws {
+        let store = try await WhoopStore.inMemory()
+        let cols = try await store.columnNamesForTest(table: "sleepSession")
+        XCTAssertTrue(cols.contains("userEdited"), "sleepSession missing v13 userEdited column")
     }
 }

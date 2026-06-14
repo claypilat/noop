@@ -250,6 +250,17 @@ extension WhoopStore {
                 t.primaryKey(["deviceId", "ts"])
             }
         }
+
+        // v13 (#318-adjacent): user-corrected sleep times. A `userEdited` flag on sleepSession marks a
+        // session whose wake/sleep bounds the user fixed by hand; the post-sync recompute pass preserves
+        // those bounds instead of re-upserting the strap-detected session over them (mirrors Android's
+        // `userEdited` guard in IntelligenceEngine, PR #367). Additive + nullable-safe: NOT NULL DEFAULT 0
+        // so every existing row reads as un-edited and old readers that don't SELECT it keep working.
+        migrator.registerMigration("v13") { db in
+            try db.alter(table: "sleepSession") { t in
+                t.add(column: "userEdited", .boolean).notNull().defaults(to: false)
+            }
+        }
         return migrator
     }
 }
