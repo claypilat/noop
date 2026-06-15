@@ -23,12 +23,19 @@ public struct CachedSleepSession: Equatable, Codable {
     /// strap-detected values (see `upsertSleepSessions`). Defaults false so every cache/recompute path
     /// that doesn't know about edits keeps producing un-edited rows.
     public let userEdited: Bool
+    /// The user's hand-corrected sleep ONSET, or nil when the onset wasn't edited. `startTs` remains the
+    /// immutable detected key; display + re-staging use `effectiveStartTs`. (#318)
+    public let startTsAdjusted: Int?
+    /// The onset to display / stage from: the user's correction if present, else the detected `startTs`.
+    public var effectiveStartTs: Int { startTsAdjusted ?? startTs }
     public init(startTs: Int, endTs: Int, efficiency: Double?, restingHr: Int?,
-                avgHrv: Double?, stagesJSON: String?, userEdited: Bool = false) {
+                avgHrv: Double?, stagesJSON: String?, userEdited: Bool = false,
+                startTsAdjusted: Int? = nil) {
         self.startTs = startTs; self.endTs = endTs
         self.efficiency = efficiency; self.restingHr = restingHr
         self.avgHrv = avgHrv; self.stagesJSON = stagesJSON
         self.userEdited = userEdited
+        self.startTsAdjusted = startTsAdjusted
     }
 }
 
@@ -80,38 +87,46 @@ extension WhoopStore {
             for s in sessions {
                 try db.execute(sql: """
                     INSERT INTO sleepSession
-                        (deviceId, startTs, endTs, efficiency, restingHr, avgHrv, stagesJSON, userEdited)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        (deviceId, startTs, endTs, efficiency, restingHr, avgHrv, stagesJSON,
+                         userEdited, startTsAdjusted)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(deviceId, startTs) DO UPDATE SET
-                        -- A user-corrected night keeps its hand-set wake time and stage breakdown; a
-                        -- recompute/import refresh (this path) updates only the derived vitals. The
+                        -- A user-corrected night keeps its hand-set bed/wake times and stage breakdown;
+                        -- a recompute/import refresh (this path) updates only the derived vitals. The
                         -- `userEdited` flag is preserved, never cleared here, so a later strap re-sync
-                        -- can't revert a correction (the dedicated edit path is `setSleepWakeTime`).
+                        -- can't revert a correction (the dedicated edit path is `applySleepEdit`).
                         endTs = CASE WHEN sleepSession.userEdited THEN sleepSession.endTs ELSE excluded.endTs END,
                         efficiency = excluded.efficiency,
                         restingHr = excluded.restingHr,
                         avgHrv = excluded.avgHrv,
                         stagesJSON = CASE WHEN sleepSession.userEdited THEN sleepSession.stagesJSON ELSE excluded.stagesJSON END,
+                        startTsAdjusted = CASE WHEN sleepSession.userEdited THEN sleepSession.startTsAdjusted ELSE excluded.startTsAdjusted END,
                         userEdited = sleepSession.userEdited
                     """, arguments: [deviceId, s.startTs, s.endTs, s.efficiency,
-                                     s.restingHr, s.avgHrv, s.stagesJSON, s.userEdited])
+                                     s.restingHr, s.avgHrv, s.stagesJSON, s.userEdited, s.startTsAdjusted])
                 n += db.changesCount
             }
             return n
         }
     }
 
-    /// Hand-correct a sleep session's wake (end) time. Sets `userEdited = 1` so the next recompute/import
-    /// `upsertSleepSessions` preserves the corrected `endTs` instead of overwriting it with the
-    /// strap-detected value. Keyed by the stable natural key (deviceId, startTs) — only the wake time is
-    /// editable in this version, so the key never moves. Returns rows changed (0 if no such session).
+    /// Hand-correct a sleep session's bed (onset) and/or wake (end) time. Sets `userEdited = 1` so the
+    /// next recompute/import `upsertSleepSessions` preserves the corrected bounds instead of overwriting
+    /// them with the strap-detected values. Keyed by the stable detected natural key
+    /// (deviceId, `detectedStartTs`) — which never moves; the corrected onset is stored in
+    /// `startTsAdjusted`. `newStartTs == detectedStartTs` leaves the onset effectively unchanged.
+    /// `stagesJSON`, when non-nil, replaces the stored breakdown (the caller re-derives it for the new
+    /// window via `SleepStager.stageSession`, falling back to `SleepWindowReclip`); nil keeps the
+    /// existing stages. Returns rows changed (0 if no such session).
     @discardableResult
-    public func setSleepWakeTime(deviceId: String, startTs: Int, endTs: Int) async throws -> Int {
+    public func applySleepEdit(deviceId: String, detectedStartTs: Int, newStartTs: Int, newEndTs: Int,
+                               stagesJSON: String? = nil) async throws -> Int {
         try syncWrite { db in
             try db.execute(sql: """
-                UPDATE sleepSession SET endTs = ?, userEdited = 1
+                UPDATE sleepSession
+                SET startTsAdjusted = ?, endTs = ?, stagesJSON = COALESCE(?, stagesJSON), userEdited = 1
                 WHERE deviceId = ? AND startTs = ?
-                """, arguments: [endTs, deviceId, startTs])
+                """, arguments: [newStartTs, newEndTs, stagesJSON, deviceId, detectedStartTs])
             return db.changesCount
         }
     }
@@ -179,7 +194,8 @@ extension WhoopStore {
     public func sleepSessions(deviceId: String, from: Int, to: Int, limit: Int) async throws -> [CachedSleepSession] {
         try syncRead { db in
             try Row.fetchAll(db, sql: """
-                SELECT startTs, endTs, efficiency, restingHr, avgHrv, stagesJSON, userEdited FROM sleepSession
+                SELECT startTs, endTs, efficiency, restingHr, avgHrv, stagesJSON, userEdited,
+                       startTsAdjusted FROM sleepSession
                 WHERE deviceId = ? AND startTs >= ? AND startTs <= ?
                 ORDER BY startTs ASC LIMIT ?
                 """, arguments: [deviceId, from, to, limit])
@@ -187,7 +203,7 @@ extension WhoopStore {
                     CachedSleepSession(startTs: $0["startTs"], endTs: $0["endTs"],
                                        efficiency: $0["efficiency"], restingHr: $0["restingHr"],
                                        avgHrv: $0["avgHrv"], stagesJSON: $0["stagesJSON"],
-                                       userEdited: $0["userEdited"])
+                                       userEdited: $0["userEdited"], startTsAdjusted: $0["startTsAdjusted"])
                 }
         }
     }

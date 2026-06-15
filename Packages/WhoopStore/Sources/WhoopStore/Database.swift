@@ -261,6 +261,16 @@ extension WhoopStore {
                 t.add(column: "userEdited", .boolean).notNull().defaults(to: false)
             }
         }
+
+        // v14 (#318): user-corrected sleep ONSET. `startTs` stays the immutable detected key (so the
+        // recompute guard and daily override keep matching on it); the hand-set bedtime lives here.
+        // Nullable — null means "onset not edited, use startTs". Additive, so existing rows/readers are
+        // unaffected.
+        migrator.registerMigration("v14") { db in
+            try db.alter(table: "sleepSession") { t in
+                t.add(column: "startTsAdjusted", .integer)
+            }
+        }
         return migrator
     }
 }
