@@ -163,9 +163,14 @@ public struct BevelGauge: View {
                     .foregroundStyle(StrandPalette.textTertiary)
             }
             if let stateText {
+                // Scale the state word WITH the gauge, like the number (0.30·d) and caption (0.085·d) do.
+                // `min(11, …)` pins it to the original 11pt overline on the large solo-hero rings (≥130pt)
+                // so they look unchanged, but shrinks it on the small three-up rings — where a fixed 11pt
+                // word overflowed the arc, spanned the whole card, and collided with the number/caption.
+                let stateSize = min(11, diameter * 0.085)
                 Text(stateText)
-                    .font(StrandFont.overline)
-                    .tracking(StrandFont.overlineTracking)
+                    .font(StrandFont.rounded(stateSize, weight: .bold))
+                    .tracking(StrandFont.overlineTracking * stateSize / 11)
                     .foregroundStyle(tipColor)
                     .padding(.top, 2)
             }
